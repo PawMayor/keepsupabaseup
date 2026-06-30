@@ -2,16 +2,69 @@ name: Keep Supabase Awake
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # Daily Supabase ping.
+    # GitHub cron uses UTC. This runs daily at 09:23 UTC.
+    # Avoid minute 0 because GitHub says top-of-hour schedules are more likely to be delayed/dropped.
+    - cron: '23 9 * * *'
+
+    # Monthly repo-activity commit.
+    # Runs on the 1st of each month at 09:41 UTC.
+    - cron: '41 9 1 * *'
+
   workflow_dispatch:
+    inputs:
+      update_timestamp:
+        description: 'Also update the monthly timestamp file?'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
 
 jobs:
   ping:
+    name: Ping Supabase
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+
     steps:
-      - name: Ping Supabase
+      - name: Ping Supabase REST endpoint
         run: |
-          curl --fail --silent --show-error \
+          curl -fsS \
+            --retry 3 \
+            --retry-all-errors \
+            --retry-delay 10 \
+            --max-time 20 \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-            "https://jzhypwgkhcpgclwiarnk.supabase.co/rest/v1/ping?select=id&limit=1"
+            "https://jzhypmgkhcpgclwianrk.supabase.co/rest/v1/ping?select=id&limit=1"
+
+  keep-repo-active:
+    name: Monthly timestamp commit
+    runs-on: ubuntu-latest
+
+    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '41 9 1 * *') || (github.event_name == 'workflow_dispatch' && inputs.update_timestamp == true) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Update timestamp file and commit it
+        run: |
+          mkdir -p .github/keepalive
+
+          date -u +"Last monthly activity commit: %Y-%m-%dT%H:%M:%SZ" > .github/keepalive/last-activity.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/keepalive/last-activity.txt
+
+          if git diff --cached --quiet; then
+            echo "No timestamp change to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: monthly keepalive timestamp"
+          git push
