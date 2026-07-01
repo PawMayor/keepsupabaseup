@@ -38,7 +38,7 @@ jobs:
             --max-time 20 \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-            "https://jzhypmgkhcpgclwianrk.supabase.co/rest/v1/ping?select=id&limit=1"
+            "https://jzhypmgkhcpgclwianrk.supabase.co/"
 
   keep-repo-active:
     name: Monthly timestamp commit
