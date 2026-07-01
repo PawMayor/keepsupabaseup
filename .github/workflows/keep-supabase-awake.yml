@@ -4,7 +4,7 @@ on:
   schedule:
     # Daily Supabase ping.
     # GitHub cron uses UTC. This runs daily at 09:23 UTC.
-    # Avoid minute 0 because GitHub says top-of-hour schedules are more likely to be delayed/dropped.
+    # Avoid minute 0 because top-of-hour schedules are more likely to be delayed/dropped.
     - cron: '23 9 * * *'
 
     # Monthly repo-activity commit.
@@ -30,21 +30,34 @@ jobs:
 
     steps:
       - name: Ping Supabase REST endpoint
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_PING_URL: https://jzhypwgkhcpgclwiarnk.supabase.co/rest/v1/ping?select=id&limit=1
         run: |
-          curl -fsS \
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::Missing GitHub secret: SUPABASE_ANON_KEY"
+            exit 1
+          fi
+
+          echo "Pinging Supabase URL:"
+          echo "$SUPABASE_PING_URL"
+
+          curl --fail-with-body --show-error --silent \
             --retry 3 \
             --retry-all-errors \
             --retry-delay 10 \
             --max-time 20 \
-            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-            "https://jzhypmgkhcpgclwianrk.supabase.co/"
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            "$SUPABASE_PING_URL"
 
   keep-repo-active:
     name: Monthly timestamp commit
     runs-on: ubuntu-latest
 
-    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '41 9 1 * *') || (github.event_name == 'workflow_dispatch' && inputs.update_timestamp == true) }}
+    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '41 9 1 * *') || (github.event_name == 'workflow_dispatch' && inputs.update_timestamp) }}
 
     steps:
       - name: Check out repository
@@ -52,6 +65,8 @@ jobs:
 
       - name: Update timestamp file and commit it
         run: |
+          set -euo pipefail
+
           mkdir -p .github/keepalive
 
           date -u +"Last monthly activity commit: %Y-%m-%dT%H:%M:%SZ" > .github/keepalive/last-activity.txt
