@@ -1,30 +1,49 @@
+# Save this file at EXACTLY this path in your repo:
+#   .github/workflows/keep-supabase-awake.yml
+# (If your old copy lives anywhere else, delete it.)
+#
+# Required GitHub secrets (repo Settings > Secrets and variables > Actions):
+#   SUPABASE_ANON_KEY      - you already have this one
+#   SUPABASE_ACCESS_TOKEN  - NEW. Personal access token from
+#                            https://supabase.com/dashboard/account/tokens
+#                            Enables automatic un-pausing if the project gets paused.
+
 name: Keep Supabase Awake
 
 on:
   schedule:
-    # Runs every Monday and Thursday at 09:23 UTC.
-    # This keeps Supabase active and also creates regular GitHub repo activity.
-    - cron: '23 9 * * 1,4'
-
+    # Daily at 08:37 UTC. Daily pings are needed because Supabase pauses
+    # Free projects that get too FEW queries in a week - twice weekly is
+    # not reliably enough, and a single missed run must not matter.
+    - cron: '37 8 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
+env:
+  PROJECT_REF: jzhypwgkhcpgclwiarnk
+  PING_URL: https://jzhypwgkhcpgclwiarnk.supabase.co/rest/v1/ping?select=id&limit=1
+
 jobs:
-  ping-and-timestamp:
-    name: Ping Supabase and update timestamp
+  keepalive:
+    name: Ping Supabase (auto-restore if paused)
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Ping Supabase
+        id: ping
         env:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          SUPABASE_PING_URL: https://jzhypwgkhcpgclwiarnk.supabase.co/rest/v1/ping?select=id&limit=1
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -33,19 +52,73 @@ jobs:
             exit 1
           fi
 
-          echo "Pinging Supabase:"
-          echo "$SUPABASE_PING_URL"
+          # Makes one REST query against the database. Prints the HTTP status code.
+          ping_once() {
+            curl --silent --show-error \
+              --output /tmp/ping_body.txt \
+              --write-out "%{http_code}" \
+              --max-time 20 \
+              -H "apikey: $SUPABASE_ANON_KEY" \
+              -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+              "$PING_URL" || echo "000"
+          }
 
-          curl --fail-with-body --show-error --silent \
-            --retry 3 \
-            --retry-all-errors \
-            --retry-delay 10 \
-            --max-time 20 \
-            -H "apikey: $SUPABASE_ANON_KEY" \
-            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-            "$SUPABASE_PING_URL"
+          # Fires several real queries so weekly activity is clearly "sufficient".
+          ping_burst() {
+            local ok=1
+            for i in 1 2 3; do
+              code="$(ping_once)"
+              echo "Query $i -> HTTP $code"
+              if [ "$code" = "200" ]; then ok=0; fi
+              sleep 2
+            done
+            return $ok
+          }
+
+          echo "Pinging Supabase project $PROJECT_REF ..."
+          if ping_burst; then
+            echo "Project is awake and responding."
+            exit 0
+          fi
+
+          echo "::warning::Ping failed. Last response body:"
+          cat /tmp/ping_body.txt || true
+
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::Ping failed and SUPABASE_ACCESS_TOKEN is not set, so the project cannot be restored automatically. Restore it once in the Supabase dashboard, then add the secret (https://supabase.com/dashboard/account/tokens) to enable auto-restore."
+            exit 1
+          fi
+
+          echo "Project appears to be paused or unreachable. Requesting restore via Management API..."
+          restore_code="$(curl --silent --show-error \
+            --output /tmp/restore_body.txt \
+            --write-out "%{http_code}" \
+            --max-time 30 \
+            -X POST \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.supabase.com/v1/projects/$PROJECT_REF/restore" || echo "000")"
+          echo "Restore request -> HTTP $restore_code"
+          cat /tmp/restore_body.txt || true
+          echo ""
+
+          echo "Waiting for the project to come back online (up to ~12 minutes)..."
+          for attempt in $(seq 1 24); do
+            sleep 30
+            code="$(ping_once)"
+            echo "Re-check $attempt -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "Project restored and responding. Sending follow-up queries..."
+              ping_burst || true
+              exit 0
+            fi
+          done
+
+          echo "::error::Project is still not responding after a restore attempt. Check the Supabase dashboard: https://supabase.com/dashboard/project/$PROJECT_REF"
+          exit 1
 
       - name: Update timestamp file and commit
+        if: success()
         run: |
           set -euo pipefail
 
@@ -64,4 +137,6 @@ jobs:
           fi
 
           git commit -m "chore: record Supabase keepalive ping"
+          # Rebase in case anything else pushed since checkout, then push.
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
           git push
